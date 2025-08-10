@@ -1,0 +1,268 @@
+#!/usr/bin/env node
+
+// persistent-start.js - Single persistent MCP connection
+import { startPersistentAPI, ConnectionMonitor } from ‘./persistent-mcp-api.js’;
+import dotenv from ‘dotenv’;
+
+dotenv.config();
+
+async function main() {
+console.log(‘🚀 Starting Persistent MCP REST API…’);
+console.log(‘📝 This will create ONE MCP connection and reuse it for all requests’);
+
+if (!process.env.ANTHROPIC_API_KEY) {
+console.error(‘❌ ANTHROPIC_API_KEY environment variable is required’);
+process.exit(1);
+}
+
+const config = {
+command: process.env.MCP_COMMAND || ‘npx’,
+args: process.env.MCP_ARGS
+? process.env.MCP_ARGS.split(’,’)
+: [’-y’, ‘@modelcontextprotocol/server-filesystem’, process.cwd()],
+env: process.env.MCP_ENV ? JSON.parse(process.env.MCP_ENV) : {},
+anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+model: process.env.ANTHROPIC_MODEL || ‘claude-3-5-sonnet-20241022’,
+maxTokens: parseInt(process.env.MAX_TOKENS || ‘4000’)
+};
+
+const port = parseInt(process.env.PORT || ‘3000’);
+const enableMonitoring = process.env.ENABLE_MONITORING !== ‘false’;
+
+try {
+// Start the API with persistent connection
+const api = await startPersistentAPI(config, port);
+
+```
+console.log(`✅ Persistent API running on http://localhost:${port}`);
+console.log('📚 Available endpoints:');
+console.log('  POST /chat - Send a question, get a response');
+console.log('  GET  /health - Health check with connection status');
+console.log('  GET  /connection-status - Detailed connection info');
+console.log('  POST /reconnect - Force reconnection');
+
+console.log('\n💡 Example usage:');
+console.log(`curl -X POST http://localhost:${port}/chat \\`);
+console.log(`  -H "Content-Type: application/json" \\`);
+console.log(`  -d '{"message": "List files in current directory"}'`);
+
+// Optional connection monitoring
+let monitor;
+if (enableMonitoring) {
+  monitor = new ConnectionMonitor(api);
+  monitor.startMonitoring(30000); // Check every 30 seconds
+  console.log('\n📊 Connection monitoring enabled (every 30s)');
+}
+
+// Graceful shutdown
+const shutdown = async () => {
+  console.log('\n🛑 Shutting down...');
+  
+  if (monitor) {
+    monitor.stopMonitoring();
+  }
+  
+  await api.shutdown();
+  console.log('✅ Server stopped');
+  process.exit(0);
+};
+
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
+
+// Show initial connection status after a brief delay
+setTimeout(async () => {
+  try {
+    const response = await fetch(`http://localhost:${port}/connection-status`);
+    const status = await response.json();
+    
+    console.log('\n🔗 Initial Connection Status:');
+    console.log(`  Connected: ${status.connected ? '✅' : '❌'}`);
+    console.log(`  Tools Available: ${status.tools.length}`);
+    if (status.tools.length > 0) {
+      console.log(`  Tool Names: ${status.tools.map(t => t.name).join(', ')}`);
+    }
+    console.log(`  Connection Age: ${status.connectionAge}s`);
+    
+  } catch (error) {
+    console.warn('Could not fetch initial connection status');
+  }
+}, 2000);
+```
+
+} catch (error) {
+console.error(‘❌ Failed to start server:’, error.message);
+console.log(’\n🔧 Troubleshooting:’);
+console.log(‘1. Check your ANTHROPIC_API_KEY is valid’);
+console.log(‘2. Ensure MCP server command is correct’);
+console.log(‘3. Check the MCP server is installed and accessible’);
+process.exit(1);
+}
+}
+
+main().catch(console.error);
+
+// ===========================================
+// Performance and Load Testing
+// ===========================================
+
+export async function loadTest(concurrentRequests = 5, totalRequests = 20) {
+console.log(`🧪 Load testing: ${totalRequests} requests with ${concurrentRequests} concurrent`);
+
+const results = [];
+const requests = Array(totalRequests).fill(0).map((_, i) =>
+`Test request ${i + 1}: What's ${Math.floor(Math.random() * 100)} + ${Math.floor(Math.random() * 100)}?`
+);
+
+// Function to make a single request
+const makeRequest = async (message, index) => {
+const start = Date.now();
+try {
+const response = await fetch(‘http://localhost:3000/chat’, {
+method: ‘POST’,
+headers: { ‘Content-Type’: ‘application/json’ },
+body: JSON.stringify({ message })
+});
+
+```
+  const data = await response.json();
+  const totalTime = Date.now() - start;
+  
+  return {
+    index,
+    success: true,
+    totalTime,
+    processingTime: data.processingTime,
+    connectionAge: data.connectionAge,
+    toolsUsed: data.toolsUsed?.length || 0
+  };
+} catch (error) {
+  return {
+    index,
+    success: false,
+    error: error.message,
+    totalTime: Date.now() - start
+  };
+}
+```
+
+};
+
+// Execute requests in batches
+const startTime = Date.now();
+
+for (let i = 0; i < requests.length; i += concurrentRequests) {
+const batch = requests.slice(i, i + concurrentRequests);
+const batchPromises = batch.map((message, batchIndex) =>
+makeRequest(message, i + batchIndex)
+);
+
+```
+const batchResults = await Promise.all(batchPromises);
+results.push(...batchResults);
+
+console.log(`Completed batch ${Math.floor(i / concurrentRequests) + 1}/${Math.ceil(requests.length / concurrentRequests)}`);
+```
+
+}
+
+const totalTestTime = Date.now() - startTime;
+
+// Analyze results
+const successful = results.filter(r => r.success);
+const failed = results.filter(r => !r.success);
+
+console.log(’\n📊 Load Test Results:’);
+console.log(`Total Requests: ${results.length}`);
+console.log(`Successful: ${successful.length}`);
+console.log(`Failed: ${failed.length}`);
+console.log(`Total Test Time: ${totalTestTime}ms`);
+console.log(`Requests/second: ${Math.round((results.length / totalTestTime) * 1000)}`);
+
+if (successful.length > 0) {
+const avgProcessing = successful.reduce((sum, r) => sum + r.processingTime, 0) / successful.length;
+const avgTotal = successful.reduce((sum, r) => sum + r.totalTime, 0) / successful.length;
+const minTime = Math.min(…successful.map(r => r.totalTime));
+const maxTime = Math.max(…successful.map(r => r.totalTime));
+
+```
+console.log('\n⏱️  Timing Statistics:');
+console.log(`  Avg Processing Time: ${Math.round(avgProcessing)}ms`);
+console.log(`  Avg Total Time: ${Math.round(avgTotal)}ms`);
+console.log(`  Min Time: ${minTime}ms`);
+console.log(`  Max Time: ${maxTime}ms`);
+
+// Connection age analysis
+const connectionAges = successful.map(r => r.connectionAge).filter(age => age !== undefined);
+if (connectionAges.length > 0) {
+  const avgAge = connectionAges.reduce((sum, age) => sum + age, 0) / connectionAges.length;
+  console.log(`  Avg Connection Age: ${Math.round(avgAge)}s (connection reused throughout test)`);
+}
+```
+
+}
+
+if (failed.length > 0) {
+console.log(’\n❌ Failed Requests:’);
+failed.forEach(f => console.log(`  Request ${f.index}: ${f.error}`));
+}
+}
+
+// Performance comparison with different approaches
+export async function compareApproaches() {
+console.log(‘🔬 Comparing connection approaches…\n’);
+
+const testMessage = “What’s 25 * 4?”;
+const numRequests = 10;
+
+console.log(`Testing ${numRequests} sequential requests with: "${testMessage}"\n`);
+
+// Test persistent connection
+console.log(‘📊 Testing Persistent Connection:’);
+const persistentResults = [];
+
+for (let i = 0; i < numRequests; i++) {
+const start = Date.now();
+try {
+const response = await fetch(‘http://localhost:3000/chat’, {
+method: ‘POST’,
+headers: { ‘Content-Type’: ‘application/json’ },
+body: JSON.stringify({ message: testMessage })
+});
+const data = await response.json();
+const totalTime = Date.now() - start;
+
+```
+  persistentResults.push({
+    totalTime,
+    processingTime: data.processingTime,
+    connectionAge: data.connectionAge
+  });
+  
+  console.log(`  Request ${i + 1}: ${totalTime}ms (processing: ${data.processingTime}ms, conn age: ${data.connectionAge}s)`);
+} catch (error) {
+  console.log(`  Request ${i + 1}: FAILED - ${error.message}`);
+}
+```
+
+}
+
+const avgPersistent = persistentResults.reduce((sum, r) => sum + r.totalTime, 0) / persistentResults.length;
+const avgProcessing = persistentResults.reduce((sum, r) => sum + r.processingTime, 0) / persistentResults.length;
+
+console.log(`\n📈 Persistent Connection Average: ${Math.round(avgPersistent)}ms total, ${Math.round(avgProcessing)}ms processing`);
+console.log(`🔗 Connection reused throughout all ${numRequests} requests`);
+}
+
+// Add command line options
+if (process.argv.includes(’–load-test’)) {
+setTimeout(() => {
+const concurrent = parseInt(process.argv.find(arg => arg.startsWith(’–concurrent=’))?.split(’=’)[1] || ‘5’);
+const total = parseInt(process.argv.find(arg => arg.startsWith(’–total=’))?.split(’=’)[1] || ‘20’);
+loadTest(concurrent, total);
+}, 3000);
+}
+
+if (process.argv.includes(’–compare’)) {
+setTimeout(() => compareApproaches(), 3000);
+}
