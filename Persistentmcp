@@ -1,0 +1,429 @@
+import express from ‘express’;
+import cors from ‘cors’;
+import { MCPClient, createMCPAssistant } from ‘./mcp-client.js’;
+
+interface MCPConfig {
+command: string;
+args?: string[];
+env?: Record<string, string>;
+anthropicApiKey: string;
+model?: string;
+maxTokens?: number;
+}
+
+interface ChatRequest {
+message: string;
+config?: Partial<MCPConfig>;
+}
+
+interface ChatResponse {
+response: string;
+toolsUsed: string[];
+processingTime: number;
+connectionAge: number;
+}
+
+export class PersistentMCPAPI {
+private app: express.Application;
+private config: MCPConfig;
+private mcpClient: MCPClient | null = null;
+private connectionStartTime: Date | null = null;
+private isConnecting = false;
+private connectionPromise: Promise<MCPClient> | null = null;
+private reconnectAttempts = 0;
+private maxReconnectAttempts = 3;
+private reconnectDelay = 5000; // 5 seconds
+
+constructor(config: MCPConfig, port: number = 3000) {
+this.app = express();
+this.config = config;
+this.setupMiddleware();
+this.setupRoutes();
+
+```
+this.app.listen(port, () => {
+  console.log(`Persistent MCP API running on port ${port}`);
+  console.log('Establishing MCP connection...');
+  this.initializeConnection();
+});
+```
+
+}
+
+private setupMiddleware(): void {
+this.app.use(cors());
+this.app.use(express.json({ limit: ‘10mb’ }));
+
+```
+this.app.use((req, res, next) => {
+  const status = this.mcpClient ? 'connected' : 'disconnected';
+  const age = this.connectionStartTime 
+    ? Math.round((Date.now() - this.connectionStartTime.getTime()) / 1000)
+    : 0;
+  
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path} [MCP: ${status}, Age: ${age}s]`);
+  next();
+});
+```
+
+}
+
+private setupRoutes(): void {
+this.app.get(’/health’, this.healthCheck.bind(this));
+this.app.post(’/chat’, this.handleChat.bind(this));
+this.app.get(’/connection-status’, this.getConnectionStatus.bind(this));
+this.app.post(’/reconnect’, this.forceReconnect.bind(this));
+
+```
+this.app.use(this.errorHandler.bind(this));
+```
+
+}
+
+private async initializeConnection(): Promise<void> {
+if (this.isConnecting) {
+return this.connectionPromise!;
+}
+
+```
+this.isConnecting = true;
+this.connectionPromise = this.createConnection();
+
+try {
+  this.mcpClient = await this.connectionPromise;
+  this.connectionStartTime = new Date();
+  this.reconnectAttempts = 0;
+  this.isConnecting = false;
+  
+  console.log(`✅ MCP connection established with ${this.mcpClient.tools.length} tools`);
+  console.log(`🔧 Available tools: ${this.mcpClient.tools.map(t => t.name).join(', ')}`);
+  
+  // Set up connection error handling
+  this.setupConnectionErrorHandling();
+  
+} catch (error) {
+  this.isConnecting = false;
+  this.connectionPromise = null;
+  console.error('❌ Failed to establish MCP connection:', error.message);
+  
+  // Attempt reconnection
+  await this.attemptReconnection();
+}
+```
+
+}
+
+private async createConnection(): Promise<MCPClient> {
+console.log(`Connecting to MCP server: ${this.config.command} ${(this.config.args || []).join(' ')}`);
+return await createMCPAssistant(this.config);
+}
+
+private setupConnectionErrorHandling(): void {
+if (!this.mcpClient) return;
+
+```
+// Monitor connection health
+const healthCheck = setInterval(async () => {
+  if (!this.mcpClient || !this.mcpClient.connected) {
+    console.warn('⚠️ MCP connection lost, attempting reconnection...');
+    clearInterval(healthCheck);
+    await this.attemptReconnection();
+  }
+}, 30000); // Check every 30 seconds
+
+// Store interval reference for cleanup
+(this.mcpClient as any)._healthCheckInterval = healthCheck;
+```
+
+}
+
+private async attemptReconnection(): Promise<void> {
+if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+console.error(`❌ Max reconnection attempts (${this.maxReconnectAttempts}) reached. Giving up.`);
+return;
+}
+
+```
+this.reconnectAttempts++;
+console.log(`🔄 Reconnection attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts}...`);
+
+// Clean up old connection
+if (this.mcpClient) {
+  try {
+    const interval = (this.mcpClient as any)._healthCheckInterval;
+    if (interval) clearInterval(interval);
+    await this.mcpClient.disconnect();
+  } catch (error) {
+    console.warn('Error cleaning up old connection:', error.message);
+  }
+  this.mcpClient = null;
+  this.connectionStartTime = null;
+}
+
+// Wait before reconnecting
+await new Promise(resolve => setTimeout(resolve, this.reconnectDelay));
+
+// Try to reconnect
+await this.initializeConnection();
+```
+
+}
+
+private async ensureConnection(): Promise<MCPClient> {
+// If we have a healthy connection, return it
+if (this.mcpClient && this.mcpClient.connected) {
+return this.mcpClient;
+}
+
+```
+// If currently connecting, wait for it
+if (this.isConnecting && this.connectionPromise) {
+  console.log('Waiting for ongoing connection attempt...');
+  return await this.connectionPromise;
+}
+
+// Need to establish new connection
+console.log('No active connection, establishing new one...');
+await this.initializeConnection();
+
+if (!this.mcpClient) {
+  throw new Error('Failed to establish MCP connection');
+}
+
+return this.mcpClient;
+```
+
+}
+
+private healthCheck(req, res): void {
+const isConnected = this.mcpClient?.connected || false;
+const connectionAge = this.connectionStartTime
+? Math.round((Date.now() - this.connectionStartTime.getTime()) / 1000)
+: 0;
+
+```
+res.json({
+  status: isConnected ? 'healthy' : 'unhealthy',
+  mcp: {
+    connected: isConnected,
+    connectionAge,
+    toolsAvailable: this.mcpClient?.tools.length || 0,
+    reconnectAttempts: this.reconnectAttempts
+  },
+  timestamp: new Date().toISOString()
+});
+```
+
+}
+
+private getConnectionStatus(req, res): void {
+const isConnected = this.mcpClient?.connected || false;
+const connectionAge = this.connectionStartTime
+? Math.round((Date.now() - this.connectionStartTime.getTime()) / 1000)
+: 0;
+
+```
+res.json({
+  connected: isConnected,
+  connectionAge,
+  connectionStartTime: this.connectionStartTime?.toISOString() || null,
+  tools: this.mcpClient?.tools.map(t => ({ name: t.name, description: t.description })) || [],
+  reconnectAttempts: this.reconnectAttempts,
+  isReconnecting: this.isConnecting
+});
+```
+
+}
+
+private async forceReconnect(req, res): Promise<void> {
+try {
+console.log(‘🔄 Manual reconnection requested…’);
+
+```
+  // Reset reconnect attempts
+  this.reconnectAttempts = 0;
+  
+  // Force reconnection
+  await this.attemptReconnection();
+  
+  res.json({
+    success: true,
+    message: 'Reconnection initiated',
+    connected: this.mcpClient?.connected || false
+  });
+} catch (error) {
+  res.status(500).json({
+    success: false,
+    error: error.message
+  });
+}
+```
+
+}
+
+private async handleChat(req, res): Promise<void> {
+const startTime = Date.now();
+
+```
+try {
+  const { message }: ChatRequest = req.body;
+
+  if (!message || typeof message !== 'string') {
+    res.status(400).json({ error: 'Message is required and must be a string' });
+    return;
+  }
+
+  // Ensure we have a working connection
+  const client = await this.ensureConnection();
+  
+  // Clear any previous conversation history to maintain stateless behavior
+  client.clearHistory();
+  
+  console.log(`Processing message with persistent connection (age: ${Math.round((Date.now() - this.connectionStartTime!.getTime()) / 1000)}s)`);
+  
+  // Process the message
+  const response = await client.ask(message);
+  
+  const processingTime = Date.now() - startTime;
+  const connectionAge = Math.round((Date.now() - this.connectionStartTime!.getTime()) / 1000);
+  
+  const chatResponse: ChatResponse = {
+    response,
+    toolsUsed: client.tools.map(t => t.name),
+    processingTime,
+    connectionAge
+  };
+
+  console.log(`✅ Request processed in ${processingTime}ms (connection reused)`);
+  res.json(chatResponse);
+
+} catch (error) {
+  console.error('❌ Chat error:', error);
+  
+  // If it's a connection error, try to reconnect for next request
+  if (error.message.includes('connection') || error.message.includes('disconnect')) {
+    console.log('Connection error detected, will reconnect for next request');
+    this.mcpClient = null;
+    this.connectionStartTime = null;
+  }
+  
+  res.status(500).json({ 
+    error: 'Failed to process message',
+    details: error.message,
+    connectionStatus: this.mcpClient?.connected || false
+  });
+}
+```
+
+}
+
+private errorHandler(error, req, res, next): void {
+console.error(‘Unhandled error:’, error);
+res.status(500).json({
+error: ‘Internal server error’,
+details: process.env.NODE_ENV === ‘development’ ? error.message : undefined
+});
+}
+
+async shutdown(): Promise<void> {
+console.log(‘🛑 Shutting down Persistent MCP API…’);
+
+```
+if (this.mcpClient) {
+  try {
+    // Clear health check interval
+    const interval = (this.mcpClient as any)._healthCheckInterval;
+    if (interval) clearInterval(interval);
+    
+    await this.mcpClient.disconnect();
+    console.log('✅ MCP connection closed');
+  } catch (error) {
+    console.error('Error closing MCP connection:', error);
+  }
+}
+
+this.mcpClient = null;
+this.connectionStartTime = null;
+console.log('✅ Shutdown complete');
+```
+
+}
+}
+
+// ===========================================
+// Simple startup function
+// ===========================================
+
+export async function startPersistentAPI(config: MCPConfig, port = 3000): Promise<PersistentMCPAPI> {
+console.log(‘🚀 Starting Persistent MCP API (single connection for all requests)’);
+console.log(`🔧 MCP Server: ${config.command} ${(config.args || []).join(' ')}`);
+
+return new PersistentMCPAPI(config, port);
+}
+
+// ===========================================
+// Connection monitoring utilities
+// ===========================================
+
+export class ConnectionMonitor {
+private api: PersistentMCPAPI;
+private monitoringInterval: NodeJS.Timeout | null = null;
+
+constructor(api: PersistentMCPAPI) {
+this.api = api;
+}
+
+startMonitoring(intervalMs = 10000): void {
+console.log(`📊 Starting connection monitoring (every ${intervalMs/1000}s)`);
+
+```
+this.monitoringInterval = setInterval(async () => {
+  try {
+    const response = await fetch('http://localhost:3000/connection-status');
+    const status = await response.json();
+    
+    console.log(`📊 Connection: ${status.connected ? '✅' : '❌'} | Age: ${status.connectionAge}s | Tools: ${status.tools.length}`);
+    
+    if (!status.connected && !status.isReconnecting) {
+      console.log('⚠️ Connection down, triggering reconnection...');
+      await fetch('http://localhost:3000/reconnect', { method: 'POST' });
+    }
+    
+  } catch (error) {
+    console.error('📊 Monitoring error:', error.message);
+  }
+}, intervalMs);
+```
+
+}
+
+stopMonitoring(): void {
+if (this.monitoringInterval) {
+clearInterval(this.monitoringInterval);
+this.monitoringInterval = null;
+console.log(‘📊 Connection monitoring stopped’);
+}
+}
+}
+
+/*
+// Example usage:
+const config = {
+command: ‘npx’,
+args: [’-y’, ‘@modelcontextprotocol/server-filesystem’, ‘/tmp’],
+anthropicApiKey: process.env.ANTHROPIC_API_KEY
+};
+
+const api = await startPersistentAPI(config, 3000);
+
+// Optional: Start connection monitoring
+const monitor = new ConnectionMonitor(api);
+monitor.startMonitoring(10000); // Check every 10 seconds
+
+// Graceful shutdown
+process.on(‘SIGINT’, async () => {
+monitor.stopMonitoring();
+await api.shutdown();
+process.exit(0);
+});
+*/
