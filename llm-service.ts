@@ -310,7 +310,7 @@ async function startServer() {
     command: process.env.MCP_COMMAND || 'node',
     args: process.env.MCP_ARGS ? process.env.MCP_ARGS.split(',') : ['../mcp/dist/index.js'],
     env: process.env.MCP_ENV ? JSON.parse(process.env.MCP_ENV) : {},
-    anthropicApiKey: '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',
+    anthropicApiKey: 'sk-an',
     model: process.env.ANTHROPIC_MODEL || 'claude-3-5-sonnet-20241022',
     maxTokens: parseInt(process.env.MAX_TOKENS || '4000')
   };
